@@ -218,55 +218,61 @@ if menu == "Dashboard":
         st.dataframe(df_status, hide_index=True, use_container_width=True)
 
 # HALAMAN 2: PEMINJAMAN BARU (INPUT - CREATE)
+# --- HALAMAN 2: PEMINJAMAN (INPUT - MULTI ITEM) ---
 elif menu == "Peminjaman Baru (Input)":
-    st.header("Form Peminjaman Alat")
+    st.header("📝 Form Peminjaman Baru (Multi-Item)")
     conn = get_connection()
     
-    # Ambil data untuk dropdown (Dropdown Anggota & Alat)
     df_anggota = pd.read_sql("SELECT id_anggota, nama_anggota FROM Anggota WHERE status_anggota='Aktif'", conn)
-    # Hanya ambil stok yang 'Tersedia'
-    query_stok = """
-    SELECT s.id_stok, a.nama_alat, s.id_alat 
-    FROM Stok s JOIN Alat a ON s.id_alat = a.id_alat 
-    WHERE s.status_stok = 'Tersedia'
-    """
-    df_stok = pd.read_sql(query_stok, conn)
+    
+    # Ambil stok tersedia
+    df_stok = pd.read_sql("""
+        SELECT s.id_stok, a.nama_alat 
+        FROM Stok s JOIN Alat a ON s.id_alat = a.id_alat 
+        WHERE s.status_stok = 'Tersedia'
+    """, conn)
     
     with st.form("form_pinjam"):
-        # Selectbox Anggota
-        anggota_pilihan = st.selectbox(
-            "Pilih Anggota", 
-            df_anggota['id_anggota'].tolist(), 
-            format_func=lambda x: df_anggota[df_anggota['id_anggota'] == x]['nama_anggota'].values[0]
-        )
+        col1, col2 = st.columns(2)
         
-        # Selectbox Alat (Stok Tersedia)
-        stok_pilihan = st.selectbox(
-            "Pilih Alat (Hanya yang Tersedia)", 
-            df_stok['id_stok'].tolist(),
-            format_func=lambda x: f"ID: {x} - " + df_stok[df_stok['id_stok'] == x]['nama_alat'].values[0]
-        )
-        
-        tgl = st.date_input("Tanggal Pinjam", date.today())
+        with col1:
+            anggota_id = st.selectbox("Pilih Peminjam", df_anggota['id_anggota'], 
+                                      format_func=lambda x: df_anggota[df_anggota['id_anggota']==x]['nama_anggota'].values[0])
+            tgl_pinjam = st.date_input("Tanggal Pinjam", date.today())
+            
+        with col2:
+            # GANTI JADI MULTISELECT
+            # User bisa pilih banyak barang sekaligus
+            stok_ids = st.multiselect(
+                "Pilih Alat-Alat yang Mau Dipinjam", 
+                df_stok['id_stok'], 
+                format_func=lambda x: f"ID {x}: " + df_stok[df_stok['id_stok']==x]['nama_alat'].values[0]
+            )
+            tgl_tempo = st.date_input("Jatuh Tempo", date.today() + pd.Timedelta(days=7))
 
-        tgl_tempo = st.date_input("Jatuh Tempo", date.today() + pd.Timedelta(days=7))
-        
-        submit = st.form_submit_button("Simpan Peminjaman")
-        
-        if submit:
-            c = conn.cursor()
-            # Insert ke Tabel Pinjaman
-            c.execute("INSERT INTO Pinjaman (id_anggota, tgl_pinjam, tgl_tempo, status_pinjam) VALUES (?, ?, ?, 'Dipinjam')", (anggota_pilihan, tgl, tgl_tempo))
-            id_pinjam_baru = c.lastrowid
-            
-            # Insert ke Tabel Detail_pinjaman
-            c.execute("INSERT INTO Detail_pinjaman (id_pinjaman, id_stok) VALUES (?, ?)", (id_pinjam_baru, stok_pilihan))
-            
-            # Update Status Stok jadi 'Dipinjam'
-            c.execute("UPDATE Stok SET status_stok = 'Dipinjam' WHERE id_stok = ?", (stok_pilihan,))
-            
-            conn.commit()
-            st.success("Peminjaman berhasil disimpan!")
+        if st.form_submit_button("Simpan Data"):
+            if not stok_ids:
+                st.error("Harap pilih minimal satu alat!")
+            elif tgl_tempo < tgl_pinjam:
+                st.error("Tanggal Tempo tidak logis!")
+            else:
+                c = conn.cursor()
+                
+                # 1. Buat SATU Transaksi Pinjaman (Header)
+                c.execute("INSERT INTO Pinjaman (id_anggota, tgl_pinjam, tgl_tempo, status_pinjam) VALUES (?, ?, ?, 'Dipinjam')", 
+                          (anggota_id, tgl_pinjam, tgl_tempo))
+                id_pinjam_baru = c.lastrowid
+                
+                # 2. Loop untuk memasukkan SEMUA barang yang dipilih (Detail)
+                for id_barang in stok_ids:
+                    # Masukkan ke tabel detail
+                    c.execute("INSERT INTO Detail_pinjaman (id_pinjaman, id_stok) VALUES (?, ?)", (id_pinjam_baru, id_barang))
+                    
+                    # Update status stok barang tersebut
+                    c.execute("UPDATE Stok SET status_stok='Dipinjam' WHERE id_stok=?", (id_barang,))
+                
+                conn.commit()
+                st.success(f"Berhasil meminjam {len(stok_ids)} alat sekaligus!")
 
 # HALAMAN 3: LIHAT DATA (READ)
 elif menu == "Data Pinjaman (Read)":
@@ -302,34 +308,99 @@ elif menu == "Pengembalian (Update)":
     
     # Cari pinjaman yang masih 'Dipinjam'
     df_aktif = pd.read_sql("""
-        SELECT p.id_pinjaman, ag.nama_anggota, al.nama_alat 
+        SELECT p.id_pinjaman, ag.nama_anggota, al.nama_alat, p.tgl_pinjam
         FROM Pinjaman p 
         JOIN Anggota ag ON p.id_anggota=ag.id_anggota
         JOIN Detail_pinjaman dp ON p.id_pinjaman=dp.id_pinjaman
         JOIN Stok s ON dp.id_stok=s.id_stok
         JOIN Alat al ON s.id_alat=al.id_alat
         WHERE p.status_pinjam='Dipinjam'
+        GROUP BY p.id_pinjaman
     """, conn)
     
-    pilih_id = st.selectbox("Pilih ID Pinjaman", df_aktif['id_pinjaman'])
-    kondisi = st.radio("Bagaimana Kondisi Barang Saat Kembali?", ["Aman", "Rusak"])
-    
-    if st.button("Proses Pengembalian"):
-        c = conn.cursor()
-        tgl_sekarang = date.today()
+    # Jika tidak ada pinjaman aktif, tampilkan info dan hindari error
+    if df_aktif.empty:
+        st.info("Tidak ada pinjaman aktif untuk diproses.")
+    else:
+        # Dropdown pilih Transaksi
+        pilih_id = st.selectbox(
+            "Pilih Transaksi Peminjaman", 
+            df_aktif['id_pinjaman'], 
+            format_func=lambda x: f"ID {x} - {df_aktif[df_aktif['id_pinjaman']==x]['nama_anggota'].values[0]} ({df_aktif[df_aktif['id_pinjaman']==x]['tgl_pinjam'].values[0]})"
+        )
         
-        # Update Tabel Pinjaman
-        c.execute("UPDATE Pinjaman SET status_pinjam = 'Dikembalikan', tgl_kembali = ? WHERE id_pinjaman = ?", (tgl_sekarang, pilih_id,))
+        # 2. Ambil detail barang DI TRANSAKSI TERSEBUT yang status stoknya masih 'Dipinjam'
+        # Kita filter di tabel Stok juga, biar yang sudah balik tidak muncul lagi
+        df_item_pinjam = pd.read_sql(f"""
+            SELECT s.id_stok, a.nama_alat 
+            FROM Detail_pinjaman dp
+            JOIN Stok s ON dp.id_stok = s.id_stok
+            JOIN Alat a ON s.id_alat = a.id_alat
+            WHERE dp.id_pinjaman = {pilih_id} AND s.status_stok = 'Dipinjam'
+        """, conn)
+        
+        if not df_item_pinjam.empty:
+            st.info("Silakan pilih barang yang mau dikembalikan hari ini:")
+            
+            with st.form("form_kembali"):
+                # Multiselect: User bisa pilih 1, 2, atau semua barang yang tersisa
+                items_to_return = st.multiselect(
+                    "Pilih Item",
+                    df_item_pinjam['id_stok'],
+                    format_func=lambda x: df_item_pinjam[df_item_pinjam['id_stok']==x]['nama_alat'].values[0]
+                )
+                
+                kondisi = st.radio("Kondisi Barang-Barang Tersebut?", ["Aman", "Rusak"])
+                
+                if st.form_submit_button("Proses Pengembalian"):
+                    if not items_to_return:
+                        st.error("Pilih minimal satu barang untuk dikembalikan.")
+                    else:
+                        c = conn.cursor()
+                        tgl_sekarang = date.today()
+                        status_stok_baru = 'Rusak' if kondisi == 'Rusak' else 'Tersedia'
+                        
+                        # A. Update Barang yang dipilih saja
+                        for id_stok in items_to_return:
+                            # 1. Update Detail Pinjaman (Set kondisi & tanda sudah balik)
+                            # Kita anggap kalau kondisi_kembali terisi, berarti sudah balik
+                            c.execute("""
+                                UPDATE Detail_pinjaman 
+                                SET kondisi_kembali = ? 
+                                WHERE id_pinjaman = ? AND id_stok = ?
+                            """, (kondisi, pilih_id, id_stok))
+                            
+                            # 2. Update Stok (Jadi Tersedia/Rusak)
+                            c.execute("UPDATE Stok SET status_stok = ? WHERE id_stok = ?", (status_stok_baru, id_stok))
+                        
+                        # B. Cek Sisa Barang (Logika Cerdas)
+                        # Hitung berapa barang di transaksi ini yang MASIH 'Dipinjam'
+                        c.execute(f"""
+                            SELECT count(*) 
+                            FROM Detail_pinjaman dp
+                            JOIN Stok s ON dp.id_stok = s.id_stok
+                            WHERE dp.id_pinjaman = {pilih_id} AND s.status_stok = 'Dipinjam'
+                        """)
+                        sisa_barang = c.fetchone()[0]
+                        
+                        # C. Update Status Transaksi Utama (Header)
+                        if sisa_barang == 0:
+                            # Kalau sisa 0, berarti INI PENGEMBALIAN TERAKHIR. Tutup transaksi.
+                            c.execute("UPDATE Pinjaman SET status_pinjam='Dikembalikan', tgl_kembali=? WHERE id_pinjaman=?", (tgl_sekarang, pilih_id))
+                            pesan_akhir = "Semua barang telah kembali. Transaksi selesai."
+                        else:
+                            # Kalau masih ada sisa, biarkan status 'Dipinjam'
+                            pesan_akhir = f"Masih ada {sisa_barang} barang lagi yang belum kembali. Status transaksi tetap 'Dipinjam'."
 
-        # Update Kondisi di Detail_pinjaman
-        c.execute("UPDATE Detail_pinjaman SET kondisi_kembali=? WHERE id_pinjaman=?", (kondisi, pilih_id,))
-        
-        # Cari ID Stok yang terkait untuk dikembalikan statusnya
-        c.execute("SELECT id_stok FROM Detail_pinjaman WHERE id_pinjaman = ?", (pilih_id,))
-        id_stok = c.fetchone()[0]
-        
-        # Update Tabel Stok jadi 'Tersedia' kembali
-        c.execute("UPDATE Stok SET status_stok = 'Tersedia' WHERE id_stok = ?", (id_stok,))
-        
-        conn.commit()
-        st.success(f"Pinjaman ID {pilih_id} berhasil dikembalikan. Stok kembali tersedia.")
+                        conn.commit()
+                        st.success(f"Berhasil mengembalikan {len(items_to_return)} item.")
+                        st.info(pesan_akhir)
+                        
+        else:
+            st.warning("Data error: Transaksi aktif tapi tidak ada barang yang dipinjam (Mungkin sudah kembali semua tapi status belum update).")
+            # Fitur self-healing: Update status paksa jadi kembali
+            if st.button("Fix Status Transaksi"):
+                c = conn.cursor()
+                c.execute("UPDATE Pinjaman SET status_pinjam='Dikembalikan', tgl_kembali=? WHERE id_pinjaman=?", (date.today(), pilih_id))
+                conn.commit()
+                st.rerun()
