@@ -220,7 +220,7 @@ if menu == "Dashboard":
 # HALAMAN 2: PEMINJAMAN BARU (INPUT - CREATE)
 # --- HALAMAN 2: PEMINJAMAN (INPUT - MULTI ITEM) ---
 elif menu == "Peminjaman Baru (Input)":
-    st.header("📝 Form Peminjaman Baru (Multi-Item)")
+    st.header("Form Peminjaman Baru (Multi-Item)")
     conn = get_connection()
     
     df_anggota = pd.read_sql("SELECT id_anggota, nama_anggota FROM Anggota WHERE status_anggota='Aktif'", conn)
